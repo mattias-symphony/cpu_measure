@@ -9,8 +9,10 @@
 #include "app.h"
 
 #define HISTORY 5
+#define MAX_PROCESSES 32
 
-typedef struct _CPU_MEASURE {
+
+struct cpu_data_t {
 	int count;
 	struct {
         BOOL active;
@@ -29,10 +31,10 @@ typedef struct _CPU_MEASURE {
     double prevCpuRatio;
     double cycleRatio;
     double prevCycleRatio;
-} CPU_MEASURE;
+};
 
 
-void GetSymphonyProcessList( CPU_MEASURE* list, char const* processName ) {
+void get_process_data( struct cpu_data_t* list, char const* process_name ) {
 	HANDLE snapShot = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
 	if( snapShot == INVALID_HANDLE_VALUE ) {
 		return;
@@ -42,7 +44,7 @@ void GetSymphonyProcessList( CPU_MEASURE* list, char const* processName ) {
 	BOOL valid = Process32First( snapShot, &procentry );
 	while( valid ) {
 		// Only add symphony processes to the list
-		if( strstr( procentry.szExeFile, processName ) ) {
+		if( strstr( procentry.szExeFile, process_name ) ) {
             DWORD processID = procentry.th32ProcessID;
             HANDLE hproc = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, processID );
 
@@ -99,12 +101,12 @@ int ulongcmp( void* usr, void const* a, void const* b ) {
 }
 
 
-void CaptureCpu( CPU_MEASURE* data, char const* processName ) {
+void get_cpu_data( struct cpu_data_t* data, char const* process_name ) {
 	// List all processes
 	for( int i = 0; i < data->count; ++i ) {
         data->items[ i ].active = FALSE;
     }
-	GetSymphonyProcessList( data, processName );
+	get_process_data( data, process_name );
 
 	// Calculate total CPU times
     ULONG64 cpuTime = 0;
@@ -121,7 +123,6 @@ void CaptureCpu( CPU_MEASURE* data, char const* processName ) {
             data->items[ i ].prevCycleTime = data->items[ i ].cycleTime;
         }
 	}
-	//printf( "CpuTime: %d  CycleTime: %d\n", (int) cpuTime, (int) cycleTime );
     
     memmove( data->cpuTime, data->cpuTime + 1, sizeof( data->cpuTime ) - sizeof( *data->cpuTime ) );
     data->cpuTime[ HISTORY - 1] = cpuTime;
@@ -178,7 +179,7 @@ void line( APP_U32* canvas, int width, int height, int x1, int y1, int x2, int y
 }
 
 
-void drawCycle( CPU_MEASURE* data, APP_U32 color, int pos, APP_U32* canvas, int width, int height ) {
+void draw_cycle( struct cpu_data_t* data, APP_U32 color, int pos, APP_U32* canvas, int width, int height ) {
     int x = pos;
     int y = height - (int)( data->cycleRatio * height ) - 1;
     int prevY = height - (int)( data->prevCycleRatio * height ) - 1;
@@ -186,7 +187,7 @@ void drawCycle( CPU_MEASURE* data, APP_U32 color, int pos, APP_U32* canvas, int 
 }
 
 
-void drawCpu( CPU_MEASURE* data, APP_U32 color, int pos, APP_U32* canvas, int width, int height ) {
+void draw_cpu( struct cpu_data_t* data, APP_U32 color, int pos, APP_U32* canvas, int width, int height ) {
     int x = pos;
     int y = height - (int)( data->cpuRatio * height ) - 1;
     int prevY = height - (int)( data->prevCpuRatio * height ) - 1;
@@ -194,13 +195,174 @@ void drawCpu( CPU_MEASURE* data, APP_U32 color, int pos, APP_U32* canvas, int wi
 }
 
 
-void writeToFile( FILE* fp, ULONG64 time, CPU_MEASURE* symphony, CPU_MEASURE* chrome ) {
-    fprintf( fp, "%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", \n", time, symphony->cpuTime[ HISTORY -1 ], chrome->cpuTime[ HISTORY -1 ] );
+enum arg_type_t {
+    ARG_TYPE_NONE,
+    ARG_TYPE_INVALID,
+    ARG_TYPE_STRING,
+    ARG_TYPE_PROCESS,
+    ARG_TYPE_DURATION,
+    ARG_TYPE_FILE,
+    ARG_TYPE_GRAPH,
+};
+
+
+enum arg_type_t get_arg_type( int argc, char** argv, int index ) {
+    if( index >= argc ) {
+        return ARG_TYPE_NONE;
+    }
+
+    char const* a = argv[ index ];
+    if( _stricmp( a, "-p" ) == 0 || _stricmp( a, "--process" ) == 0 ) {
+        return ARG_TYPE_PROCESS;
+    } else if( _stricmp( a, "-d" ) == 0 || _stricmp( a, "--duration" ) == 0 ) {
+        return ARG_TYPE_DURATION;
+    } else if( _stricmp( a, "-f" ) == 0 || _stricmp( a, "--file" ) == 0 ) {
+        return ARG_TYPE_FILE;
+    } else if( _stricmp( a, "-g" ) == 0 || _stricmp( a, "--graph" ) == 0 ) {
+        return ARG_TYPE_GRAPH;
+    } else if( a[ 0 ] == '-' ) {
+        return ARG_TYPE_INVALID;
+    } else { 
+        return ARG_TYPE_STRING;
+    }
+}
+
+
+struct args_t {
+    BOOL graph;
+    int duration;
+    FILE* fp;
+
+    char const* process_names[ MAX_PROCESSES ];
+    int process_count;
+};
+
+
+int parse_args( int argc, char** argv, struct args_t* args ) {
+    memset( args, 0, sizeof( *args ) );
+    int index = 1;
+    enum arg_type_t type = get_arg_type( argc, argv, index++ );
+    while( type != ARG_TYPE_NONE ) {
+        if( type == ARG_TYPE_STRING ) {
+            return EXIT_FAILURE;
+        } else if( type == ARG_TYPE_PROCESS ) {
+            if( get_arg_type( argc, argv, index ) != ARG_TYPE_STRING ) {
+                printf( "-p or --process must be followed by a process name\n" );
+                return EXIT_FAILURE;
+            }
+            if( args->process_count >= MAX_PROCESSES ) {
+                printf( "only a maximum of %d processes are supported\n", MAX_PROCESSES );
+            }
+            args->process_names[ args->process_count++ ] = argv[ index++ ];
+        } else if( type == ARG_TYPE_DURATION ) {
+            if( get_arg_type( argc, argv, index ) != ARG_TYPE_STRING ) {
+                printf( "-d or --duration must be followed by number of seconds\n" );
+                return EXIT_FAILURE;
+            }
+            int duration = atoi( argv[ index++ ] );
+            if( duration <= 0 ) {
+                printf( "-d or --duration must be followed by number of seconds greater than 0\n" );
+                return EXIT_FAILURE;
+            }
+            args->duration = duration;
+        } else if( type == ARG_TYPE_FILE ) {
+            if( get_arg_type( argc, argv, index ) != ARG_TYPE_STRING ) {
+                printf( "-f or --file must be followed by a filename\n" );
+                return EXIT_FAILURE;
+            }
+            char const* filename = argv[ index++ ];
+            args->fp = fopen( filename, "w" );
+            if( !args->fp ) {
+                printf( "-f or --file must be followed by a valid filename\n" );
+                printf( "  failed to open file: %s\n", filename );
+                return EXIT_FAILURE;
+            }
+        } else if( type == ARG_TYPE_GRAPH ) {
+            if( get_arg_type( argc, argv, index ) == ARG_TYPE_STRING ) {
+                printf( "-g or --graph should not be followed by a parameter\n" );
+                return EXIT_FAILURE;
+            }
+            args->graph = TRUE;
+        }
+
+        type = get_arg_type( argc, argv, index++ );
+    }
+    
+    if( !args->graph && args->duration == 0 ) {
+        printf( "When running without --graph or -g, a duration must be specified with --duration or -d\n" );
+        return EXIT_FAILURE;
+    }
+
+    if( !args->graph && !args->fp) {
+        printf( "When running without --graph or -g, a valid filename must be specified with --file or -f\n" );
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+
+struct run_data_t {
+    struct args_t* args;
+    struct cpu_data_t cpu_data[ MAX_PROCESSES ];
+    ULONG64 freq;
+    ULONG64 start_time;
+};
+
+
+void init_run_data( struct run_data_t* data, struct args_t* args ) {
+    memset( data, 0, sizeof( *data ) );
+    data->args = args;
+
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency( &f );
+    data->freq = f.QuadPart;
+
+    LARGE_INTEGER s;
+    QueryPerformanceCounter( &s );
+    data->start_time = s.QuadPart;
+
+    for( int i = 0; i < args->process_count; ++i ) {        
+        get_cpu_data( &data->cpu_data[ i ], args->process_names[ i ] );
+
+        if( data->args->fp ) {
+            fprintf( data->args->fp, "time, " );
+            for( int i = 0; i < data->args->process_count; ++i ) {                
+                fprintf( data->args->fp, "%s, ", data->args->process_names[ i ] );
+            }
+
+            fprintf( data->args->fp, "\n" );
+            fflush( data->args->fp );
+        }
+    }
+}
+
+
+void run_step( struct run_data_t* data ) {
+    Sleep( 1000 );
+
+    LARGE_INTEGER c;
+    QueryPerformanceCounter( &c );
+    ULONG64 time = c.QuadPart - data->start_time;
+
+    for( int i = 0; i < data->args->process_count; ++i ) {        
+        get_cpu_data( &data->cpu_data[ i ], data->args->process_names[ i ] );
+    }
+
+    if( data->args->fp ) {
+        fprintf( data->args->fp, "%" PRIu64 ", ", time );
+        for( int i = 0; i < data->args->process_count; ++i ) {                
+            fprintf( data->args->fp, "%" PRIu64 ", ", data->cpu_data[ i ].cpuTime[ HISTORY -1 ] );
+        }
+
+        fprintf( data->args->fp, "\n" );
+        fflush( data->args->fp );
+    }
 }
 
 
 int app_proc( app_t* app, void* user_data ) {
-    char const* filename = (char const*) user_data;
+    struct run_data_t* data = (struct run_data_t*) user_data;
 
     int const width = 400;
     int const height = 200;
@@ -208,40 +370,40 @@ int app_proc( app_t* app, void* user_data ) {
     memset( canvas, 0xff, width * height * sizeof( APP_U32 ) );
     app_screenmode( app, APP_SCREENMODE_WINDOW );
     app_window_size( app, width + width / 3, height + height / 3 );
-    app_title( app, "CPU Usage - Symphony [Blue] - Chrome [Red]" );
+    
+    int count = 0;
+    char title[ 1024 ] = "CPU Measure";
+    if( data->args->process_count == 1 ) {
+        snprintf( title, sizeof( title ), "CPU Measure - %s", 
+            data->args->process_names[ 0 ] );
+        count = 1;
+    } else if( data->args->process_count == 2 ) {
+        snprintf( title, sizeof( title ), "CPU Measure - %s [Blue] - %s [Red]", 
+            data->args->process_names[ 0 ], 
+            data->args->process_names[ 1 ] );
+        count = 2;
+    } else if( data->args->process_count >= 3 ) {
+        snprintf( title, sizeof( title ), "CPU Measure - %s [Blue] - %s [Red] - %s [Green]", 
+            data->args->process_names[ 0 ], 
+            data->args->process_names[ 1 ], 
+            data->args->process_names[ 2 ] );
+        count = 3;
+    }        
+    app_title( app, title );
 
-	CPU_MEASURE symphony = { 0 };
-    CPU_MEASURE chrome = { 0 };
-
-    FILE* fp = NULL;
-    if( filename ) {
-        fp = fopen( filename, "w" );
-    }
-
-    LARGE_INTEGER s;
-    QueryPerformanceCounter( &s );
-    ULONG64 start = s.QuadPart;
-
-    CaptureCpu( &symphony, "Symphony.exe" );
-    CaptureCpu( &chrome, "chrome.exe" );
+    APP_U32 colors[ 3 ] = { 0xffff0000, 0xff0000ff, 0xff00ff00 };
 
     int pos = 0;
+    int steps = 0;
     while( app_yield( app ) != APP_STATE_EXIT_REQUESTED ) {
-        Sleep( 1000 );
-
-        LARGE_INTEGER c;
-        QueryPerformanceCounter( &c );
-        ULONG64 time = c.QuadPart - start;
-
-        CaptureCpu( &symphony, "Symphony.exe" );
-        CaptureCpu( &chrome, "chrome.exe" );
-
-        if( fp ) {
-            writeToFile( fp, time, &symphony, &chrome );
+        run_step( data );
+        if( data->args->duration && ++steps >= data->args->duration ) {
+            break;
         }
 
-        drawCpu( &symphony, 0xffff0000, pos, canvas, width, height );
-        drawCpu( &chrome, 0xff0000ff, pos, canvas, width, height );
+        for( int i = 0; i < count; ++i ) {
+            draw_cpu( &data->cpu_data[ i ], colors[ i ], pos, canvas, width, height );
+        }
 
         ++pos;
         if( pos == width ) {
@@ -256,56 +418,59 @@ int app_proc( app_t* app, void* user_data ) {
         app_present( app, canvas, width, height, 0xffffff, 0xffffff );
     }
 
-    if( fp ) {
-        fclose( fp );
-        fp = NULL;
-    }
-
     free( canvas );
     return EXIT_SUCCESS;
 }
 
 
-int noGraphMode( char const* filename, int duration ) {
-	CPU_MEASURE symphony = { 0 };
-    CPU_MEASURE chrome = { 0 };
-
-    FILE* fp = fopen( filename, "w" );
-
-    LARGE_INTEGER s;
-    QueryPerformanceCounter( &s );
-    ULONG64 start = s.QuadPart;
-
-    CaptureCpu( &symphony, "Symphony.exe" );
-    CaptureCpu( &chrome, "chrome.exe" );
-
-    for( int i = 0; i < duration; ++i ) {
-        Sleep( 1000 );
-
-        LARGE_INTEGER c;
-        QueryPerformanceCounter( &c );
-        ULONG64 time = c.QuadPart - start;
-
-        CaptureCpu( &symphony, "Symphony.exe" );
-        CaptureCpu( &chrome, "chrome.exe" );
-
-        writeToFile( fp, time, &symphony, &chrome );
+int run_no_graph( struct run_data_t* data ) {
+    for( int i = 0; i < data->args->duration; ++i ) {
+        run_step( data );
     }
 
-    fclose( fp );
     return EXIT_SUCCESS;    
 }
 
 
 int main( int argc, char** argv ) {
-    if( ( argc > 1 && strcmp( argv[ 1 ], "--graph" ) == 0 ) || argc == 1 ) {
-        char* filename = argc > 2 ? argv[ 2 ] : NULL;
-        return app_run( app_proc, filename, NULL, NULL, NULL );
-    } else if( argc == 3 ) {
-        char const* filename = argv[ 1 ]; 
-        int duration = atoi( argv[ 2 ] );
-        return noGraphMode( filename, duration );
+    struct args_t args = { 0 };
+    
+    int result = EXIT_SUCCESS;
+    
+    if( argc <= 1 ) {
+        // defaults when no args provided
+        args.graph = TRUE;
+        args.duration = 0;
+    } else {
+        // parse args
+        result = parse_args( argc, argv, &args );
     }
 
-    return EXIT_FAILURE;
+    // default process names if none given
+    if( args.process_count == 0 ) {
+        args.process_count = 2;
+        args.process_names[ 0 ] = "Symphony.exe";
+        args.process_names[ 1 ] = "chrome.exe";
+    }
+
+    if( result == EXIT_FAILURE ) {
+        printf( "USAGE\n" );
+        // TODO: print usage
+        return EXIT_FAILURE;
+    }
+
+    struct run_data_t data;
+    init_run_data( &data, &args );
+
+    if( args.graph ) {
+        result = app_run( app_proc, &data, NULL, NULL, NULL );
+    } else {
+        result = run_no_graph( &data );
+    }
+
+    if( args.fp ) {
+        fclose( args.fp );
+    }
+
+    return result;
 }
