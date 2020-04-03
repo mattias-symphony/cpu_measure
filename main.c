@@ -6,6 +6,7 @@
 
 #define APP_IMPLEMENTATION
 #define APP_WINDOWS
+#define APP_LOG( ctx, level, message ) 
 #include "app.h"
 
 #define HISTORY 5
@@ -245,6 +246,9 @@ int parse_args( int argc, char** argv, struct args_t* args ) {
     while( type != ARG_TYPE_NONE ) {
         if( type == ARG_TYPE_STRING ) {
             return EXIT_FAILURE;
+        } else if( type == ARG_TYPE_INVALID ) {
+            printf( "Invalid commad line parameter: %s\n", argv[ index - 1 ] );
+            return EXIT_FAILURE;
         } else if( type == ARG_TYPE_PROCESS ) {
             if( get_arg_type( argc, argv, index ) != ARG_TYPE_STRING ) {
                 printf( "-p or --process must be followed by a process name\n" );
@@ -314,6 +318,16 @@ void init_run_data( struct run_data_t* data, struct args_t* args ) {
     memset( data, 0, sizeof( *data ) );
     data->args = args;
 
+    if( data->args->fp ) {
+        fprintf( data->args->fp, "time, " );
+        for( int i = 0; i < data->args->process_count; ++i ) {                
+            fprintf( data->args->fp, "%s, ", data->args->process_names[ i ] );
+        }
+
+        fprintf( data->args->fp, "\n" );
+        fflush( data->args->fp );
+    }
+
     LARGE_INTEGER f;
     QueryPerformanceFrequency( &f );
     data->freq = f.QuadPart;
@@ -324,16 +338,6 @@ void init_run_data( struct run_data_t* data, struct args_t* args ) {
 
     for( int i = 0; i < args->process_count; ++i ) {        
         get_cpu_data( &data->cpu_data[ i ], args->process_names[ i ] );
-
-        if( data->args->fp ) {
-            fprintf( data->args->fp, "time, " );
-            for( int i = 0; i < data->args->process_count; ++i ) {                
-                fprintf( data->args->fp, "%s, ", data->args->process_names[ i ] );
-            }
-
-            fprintf( data->args->fp, "\n" );
-            fflush( data->args->fp );
-        }
     }
 }
 
@@ -454,8 +458,11 @@ int main( int argc, char** argv ) {
     }
 
     if( result == EXIT_FAILURE ) {
-        printf( "USAGE\n" );
-        // TODO: print usage
+        printf( "\nUSAGE\n" );
+        printf( "    -p processname or --process processname to set which process to track. Can be specified multiple times to track multiple process\n" );
+        printf( "    -d seconds or --duration seconds to set how many seconds to record data before closing the program\n" );
+        printf( "    -f filename.csv or --file filename.csv to record data to the specified CSV file\n" );
+        printf( "    -g or --graph to display a visual graph\n" );
         return EXIT_FAILURE;
     }
 
